@@ -1,0 +1,8 @@
+.idea/
+.venv/
+untitled*
+*.h5
+*.bin
+*.pt
+*.mat
+*.txt
