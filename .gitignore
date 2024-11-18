@@ -1,5 +1,6 @@
 .idea/
 .venv/
+.env/
 untitled*
 *.h5
 *.bin

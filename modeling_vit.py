@@ -43,6 +43,90 @@ from ...utils import (
 )
 from .configuration_vit import ViTConfig
 
+import numpy as np
+
+
+def tensor_float_to_fixed_torch(tensor, N, R):
+    """
+    Convert a PyTorch tensor to fixed-point representation.
+
+    Args:
+    - tensor: A PyTorch tensor of floating-point values.
+    - N: Total number of bits in the fixed-point representation (including sign bit).
+    - R: Number of fractional bits.
+
+    Returns:
+    - A PyTorch tensor with fixed-point integer mantissa values.
+    """
+    scaled_tensor = tensor * (2 ** R)
+    fixed_tensor = torch.clamp(scaled_tensor.round(), -2 ** (N - 1), 2 ** (N - 1) - 1)
+    return fixed_tensor.int()
+
+def tensor_fixed_to_float_torch(tensor, R):
+    """
+    Convert a PyTorch fixed-point tensor back to floating-point representation.
+
+    Args:
+    - tensor: A PyTorch tensor of fixed-point integer mantissa values.
+    - R: Number of fractional bits.
+
+    Returns:
+    - A PyTorch tensor of floating-point values.
+    """
+    # Divide by the scaling factor to reverse the fixed-point quantization
+    float_tensor = tensor.float() / (2 ** R)
+    return float_tensor
+
+def adaptive_token_pruning(attn_prob, h, N, ratio):
+    # 1. Initialize token scores
+
+    # 2. Sum up the attention probabilities for each token
+    token_score = torch.sum(attn_prob, dim=1, keepdim=False)
+    token_score = token_score[0, 0, :]
+    # print(token_score.size())
+    # print(token_score)
+    # 3. Calculate the threshold for pruning
+    threshold = (h - token_score[0]) * ratio
+    # print('threshold = ', threshold)
+    # print(threshold)
+    # 4. Sort token scores (excluding the first token [CLS] typically)
+    sorted_token_score, sorted_token_idx = torch.sort(token_score[1:], descending=True)
+    # print(sorted_token_idx)
+    # 5. Determine how many tokens to keep
+    part_sum_score = 0
+    keep_num = 0
+    while part_sum_score < threshold and keep_num < sorted_token_score.size(0):
+        part_sum_score += sorted_token_score[keep_num]
+        keep_num += 1
+
+    # 6. Determine indices of tokens to retain
+    # print('keep_num', keep_num)
+    remained_idx = sorted_token_idx[:keep_num]  # Adjust index as we excluded the first token in sorting
+    remained_idx = remained_idx + 1
+    # print(remained_idx)
+    remained_idx = torch.cat((torch.tensor([0], device=attn_prob.device), remained_idx))  # Include the first token
+    # print('remained_idx size')
+    # print(remained_idx.size())
+    # print(remained_idx.size(0))
+
+    return remained_idx
+
+def create_keep_decision_mask(remained_idx, N, B):
+    # 初始化掩码，形状为 [B, N]
+    mask = torch.zeros(B, N, dtype=torch.long)
+    
+    # 遍历每个批次
+    for b in range(B):
+        # 设置该批次中应保留的 tokens
+        for idx in range(remained_idx.size(0)):
+            mask[b, remained_idx[idx]] = 1
+    
+    # 确保第一个 token 总是被保留
+    mask[:, 0] = 1
+    
+    return mask
+
+layer_count = 0
 
 logger = logging.get_logger(__name__)
 
@@ -213,63 +297,92 @@ class ViTSelfAttention(nn.Module):
     def forward(
         self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
-
-        print("cnt =  " + str(len(self.runs_dict)))
-        run_dict = {}
-        run_dict['self_query'] = self.query
-        run_dict['self_key'] = self.key
-        run_dict['self_value'] = self.value
-
-
-        run_dict['hidden_states'] = hidden_states.clone()
-
+        # print(hidden_states.size())
         mixed_query_layer = self.query(hidden_states)
-        run_dict['mixed_query_layer'] = mixed_query_layer.clone()
 
         key_layer = self.transpose_for_scores(self.key(hidden_states))
-        run_dict['key_layer'] = key_layer.clone()
         value_layer = self.transpose_for_scores(self.value(hidden_states))
-        run_dict['value_layer'] = value_layer.clone()
         query_layer = self.transpose_for_scores(mixed_query_layer)
-        run_dict['query_layer'] = query_layer.clone()
+
+        key_layer = tensor_float_to_fixed_torch(key_layer, 16, 8)
+        value_layer = tensor_float_to_fixed_torch(value_layer, 16, 8)
+        query_layer = tensor_float_to_fixed_torch(query_layer, 16, 8)
 
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
-        run_dict['attention_scores1'] = attention_scores.clone()
+        # print(attention_scores.size())
+        #run_dict['attention_scores1'] = attention_scores.clone()
+
+        attention_scores = tensor_fixed_to_float_torch(attention_scores, 16)
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        run_dict['attention_scores2'] = attention_scores.clone()
+        #run_dict['attention_scores2'] = attention_scores.clone()
 
         # Normalize the attention scores to probabilities.
         attention_probs = nn.functional.softmax(attention_scores, dim=-1)
-        run_dict['attention_probs1'] = attention_probs.clone()
+        #run_dict['attention_probs1'] = attention_probs.clone()
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
         attention_probs = self.dropout(attention_probs)
-        run_dict['attention_probs2'] = attention_probs.clone()
+        #run_dict['attention_probs2'] = attention_probs.clone()
 
         # Mask heads if we want to
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
+        global layer_count
+
+        if (layer_count == 12 or layer_count == 16 or layer_count == 20):
+            ratio = 0.9
+        else:
+            ratio = 1
+
+        layer_count = layer_count + 1
+
+        remained_idx = adaptive_token_pruning(attention_probs, h = 16, N = 577, ratio = ratio)
+
+        keep_token_mask = create_keep_decision_mask(remained_idx, N = 577, B = 1)
+
+        # print('keep token mask', keep_token_mask.size())
+        # print(keep_token_mask)
+
+        attention_probs = attention_probs * keep_token_mask.unsqueeze(1).unsqueeze(-1)
+
+        attention_probs = tensor_float_to_fixed_torch(attention_probs, 16, 8)
         context_layer = torch.matmul(attention_probs, value_layer)
-        run_dict['context_layer1'] = context_layer.clone()
+        #run_dict['context_layer1'] = context_layer.clone()
+
+        context_layer = tensor_fixed_to_float_torch(context_layer, 16)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        run_dict['context_layer2'] = context_layer.clone()
+        #run_dict['context_layer2'] = context_layer.clone()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
 
         context_layer = context_layer.view(new_context_layer_shape)
-        run_dict['context_layer3'] = context_layer.clone()
+        #run_dict['context_layer3'] = context_layer.clone()
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
-        run_dict['outputs'] = outputs[0].clone()
 
-        run_key = f"run_{len(self.runs_dict)}"
-        self.runs_dict[run_key] = run_dict
+        #print("cnt =  " + str(len(self.runs_dict)))
+        #run_dict = {}
+        #run_dict['self_query'] = self.query
+        #run_dict['self_key'] = self.key
+        #run_dict['self_value'] = self.value
 
-        torch.save(self.runs_dict, r'D:\desktop\How_much_farther_is_there_to_go\My_future_and_dream\598\Project\Model\runs_dict.pt')
+        #run_dict['hidden_states'] = hidden_states.clone()
+        #run_dict['mixed_query_layer'] = mixed_query_layer.clone()
+
+        #run_dict['key_layer'] = key_layer.clone()
+        #run_dict['value_layer'] = value_layer.clone()
+        #run_dict['query_layer'] = query_layer.clone()
+
+        #run_dict['outputs'] = outputs[0].clone()
+
+        #run_key = f"run_{len(self.runs_dict)}"
+        #self.runs_dict[run_key] = run_dict
+
+        #torch.save(self.runs_dict, r'D:\desktop\598\598_final_project\runs_dict.pt')
 
         return outputs
 

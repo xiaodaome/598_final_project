@@ -94,7 +94,7 @@ class ViTSelfAttention(nn.Module):
 
 
 layer = ViTSelfAttention()
-bin_file_path = "pytorch_model.bin"  # 替换为你的 bin 文件路径
+bin_file_path = "./pytorch_model.bin"  # 替换为你的 bin 文件路径
 state_dict = torch.load(bin_file_path, weights_only=True)
 # 加载权重文件
 layer.query.weight.data = state_dict["vit.encoder.layer.0.attention.attention.query.weight"]
