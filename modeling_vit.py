@@ -45,6 +45,8 @@ from .configuration_vit import ViTConfig
 
 import numpy as np
 import torch.nn.functional as F
+
+
 def calculate_percentage_ones(G):
     """
     Calculate the percentage of elements in G that are 1 (True).
@@ -72,6 +74,7 @@ def calculate_percentage_ones(G):
 
     return percentage_ones
 
+
 def masked_softmax(attention_scores, G, dim=-1):
     """
     Compute softmax with a mask (G).
@@ -89,13 +92,14 @@ def masked_softmax(attention_scores, G, dim=-1):
 
     # Mask the attention scores: Set masked elements to a very large negative value
     # print('before mask')
-    masked_scores = attention_scores.masked_fill( ~G, torch.tensor(float('-inf')))
+    masked_scores = attention_scores.masked_fill(~G, torch.tensor(float('-inf')))
     # print('after mask')
 
     # Apply softmax to the masked scores
     attention_probs = F.softmax(masked_scores, dim=dim)
 
     return attention_probs
+
 
 def update_G_matrix(G, keep_token_mask):
     """
@@ -137,6 +141,7 @@ def update_G_matrix(G, keep_token_mask):
 
     return G_updated
 
+
 def tensor_float_to_fixed_torch(tensor, N, R):
     """
     Convert a PyTorch tensor to fixed-point representation.
@@ -153,6 +158,7 @@ def tensor_float_to_fixed_torch(tensor, N, R):
     fixed_tensor = torch.clamp(scaled_tensor.round(), -2 ** (N - 1), 2 ** (N - 1) - 1)
     return fixed_tensor.int()
 
+
 def tensor_fixed_to_float_torch(tensor, R):
     """
     Convert a PyTorch fixed-point tensor back to floating-point representation.
@@ -167,6 +173,7 @@ def tensor_fixed_to_float_torch(tensor, R):
     # Divide by the scaling factor to reverse the fixed-point quantization
     float_tensor = tensor.float() / (2 ** R)
     return float_tensor
+
 
 def adaptive_token_pruning(attn_prob, h, N, ratio):
     # 1. Initialize token scores
@@ -202,20 +209,22 @@ def adaptive_token_pruning(attn_prob, h, N, ratio):
 
     return remained_idx
 
+
 def create_keep_decision_mask(remained_idx, N, B):
     # 初始化掩码，形状为 [B, N]
     mask = torch.zeros(B, N, dtype=torch.long)
-    
+
     # 遍历每个批次
     for b in range(B):
         # 设置该批次中应保留的 tokens
         for idx in range(remained_idx.size(0)):
             mask[b, remained_idx[idx]] = 1
-    
+
     # 确保第一个 token 总是被保留
     mask[:, 0] = 1
-    
+
     return mask
+
 
 layer_count = 0
 G = 0
@@ -276,7 +285,7 @@ class ViTEmbeddings(nn.Module):
         new_height = height // self.patch_size
         new_width = width // self.patch_size
 
-        sqrt_num_positions = torch_int(num_positions**0.5)
+        sqrt_num_positions = torch_int(num_positions ** 0.5)
         patch_pos_embed = patch_pos_embed.reshape(1, sqrt_num_positions, sqrt_num_positions, dim)
         patch_pos_embed = patch_pos_embed.permute(0, 3, 1, 2)
 
@@ -292,10 +301,10 @@ class ViTEmbeddings(nn.Module):
         return torch.cat((class_pos_embed, patch_pos_embed), dim=1)
 
     def forward(
-        self,
-        pixel_values: torch.Tensor,
-        bool_masked_pos: Optional[torch.BoolTensor] = None,
-        interpolate_pos_encoding: bool = False,
+            self,
+            pixel_values: torch.Tensor,
+            bool_masked_pos: Optional[torch.BoolTensor] = None,
+            interpolate_pos_encoding: bool = False,
     ) -> torch.Tensor:
         batch_size, num_channels, height, width = pixel_values.shape
         embeddings = self.patch_embeddings(pixel_values, interpolate_pos_encoding=interpolate_pos_encoding)
@@ -363,6 +372,7 @@ class ViTPatchEmbeddings(nn.Module):
 
 class ViTSelfAttention(nn.Module):
     runs_dict = {}
+
     def __init__(self, config: ViTConfig) -> None:
         super().__init__()
         if config.hidden_size % config.num_attention_heads != 0 and not hasattr(config, "embedding_size"):
@@ -387,9 +397,36 @@ class ViTSelfAttention(nn.Module):
         return x.permute(0, 2, 1, 3)
 
     def forward(
-        self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
+            self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
+        query_quantized = nn.Linear(1024, self.all_head_size, bias=True)
+        quantized_weight = tensor_float_to_fixed_torch(self.query.weight, 16, 8).to(torch.int32)
+        quantized_bias = tensor_float_to_fixed_torch(self.query.bias, 32, 16).to(torch.int32)
+
+        with torch.no_grad():  # 禁用梯度计算
+            query_quantized.weight.copy_(quantized_weight)
+            if query_quantized.bias is not None:  # 如果偏置存在
+                query_quantized.bias.copy_(quantized_bias)
+
+        key_quantized = nn.Linear(1024, self.all_head_size, bias=True)
+        quantized_weight = tensor_float_to_fixed_torch(self.key.weight, 16, 8).to(torch.int32)
+        quantized_bias = tensor_float_to_fixed_torch(self.key.bias, 32, 16).to(torch.int32)
+
+        with torch.no_grad():  # 禁用梯度计算
+            key_quantized.weight.copy_(quantized_weight)
+            if key_quantized.bias is not None:  # 如果偏置存在
+                key_quantized.bias.copy_(quantized_bias)
+
+        value_quantized = nn.Linear(1024, self.all_head_size, bias=True)
+        quantized_weight = tensor_float_to_fixed_torch(self.value.weight, 16, 8).to(torch.int32)
+        quantized_bias = tensor_float_to_fixed_torch(self.value.bias, 32, 16).to(torch.int32)
+
+        with torch.no_grad():  # 禁用梯度计算
+            value_quantized.weight.copy_(quantized_weight)
+            if value_quantized.bias is not None:  # 如果偏置存在
+                value_quantized.bias.copy_(quantized_bias)
         # print(hidden_states.size())
+
         global layer_count, G
 
         if (layer_count == 12 or layer_count == 4 or layer_count == 8 or layer_count == 16 or layer_count == 20):
@@ -405,16 +442,28 @@ class ViTSelfAttention(nn.Module):
         # self.value.weight = tensor_float_to_fixed_torch(value.weight, 16, 8)
         # self.value.bias = tensor_float_to_fixed_torch(value.bias, 16, 16)
 
-        mixed_query_layer = self.query(hidden_states)
+        # mixed_query_layer = self.query(hidden_states)
+        hidden_states_quantized = tensor_float_to_fixed_torch(hidden_states, 16, 8).to(torch.float32)
+        mixed_query_layer_quantized = query_quantized(hidden_states_quantized)  #
 
-        key_layer = self.transpose_for_scores(self.key(hidden_states))
-        value_layer = self.transpose_for_scores(self.value(hidden_states))
-        query_layer = self.transpose_for_scores(mixed_query_layer)
+        # key_layer = self.transpose_for_scores(self.key(hidden_states))
+        # value_layer = self.transpose_for_scores(self.value(hidden_states))
+        # query_layer = self.transpose_for_scores(mixed_query_layer)
+        key_layer = self.transpose_for_scores(key_quantized(hidden_states_quantized))
+        value_layer = self.transpose_for_scores(value_quantized(hidden_states_quantized))
+        query_layer = self.transpose_for_scores(mixed_query_layer_quantized)
+
+        key_layer = tensor_fixed_to_float_torch(key_layer, 16)
+        value_layer = tensor_fixed_to_float_torch(value_layer, 16)
+        query_layer = tensor_fixed_to_float_torch(query_layer, 16)
 
         # key_layer = tensor_fixed_to_float_torch(key_layer, 16)
         # value_layer = tensor_fixed_to_float_torch(value_layer,  16)
         # query_layer = tensor_fixed_to_float_torch(query_layer,  16)
 
+        # key_layer = tensor_float_to_fixed_torch(key_layer, 16, 8)
+        # value_layer = tensor_float_to_fixed_torch(value_layer, 16, 8)
+        # query_layer = tensor_float_to_fixed_torch(query_layer, 16, 8)
         key_layer = tensor_float_to_fixed_torch(key_layer, 16, 8)
         value_layer = tensor_float_to_fixed_torch(value_layer, 16, 8)
         query_layer = tensor_float_to_fixed_torch(query_layer, 16, 8)
@@ -422,7 +471,7 @@ class ViTSelfAttention(nn.Module):
         # Take the dot product between "query" and "key" to get the raw attention scores.
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         # print(attention_scores.size())
-        #run_dict['attention_scores1'] = attention_scores.clone()
+        # run_dict['attention_scores1'] = attention_scores.clone()
         print('layer_count', layer_count)
         if (layer_count == 0):
             G = torch.ones(attention_scores.size(), dtype=torch.bool)
@@ -432,27 +481,27 @@ class ViTSelfAttention(nn.Module):
         attention_scores = tensor_fixed_to_float_torch(attention_scores, 16)
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
-        #run_dict['attention_scores2'] = attention_scores.clone()
+        # run_dict['attention_scores2'] = attention_scores.clone()
 
         # Normalize the attention scores to probabilities.
         # attention_probs = nn.functional.softmax(attention_scores, dim=-1)
         attention_probs = masked_softmax(attention_scores, G)
         # print('attention_probs', attention_probs)
 
-        #run_dict['attention_probs1'] = attention_probs.clone()
+        # run_dict['attention_probs1'] = attention_probs.clone()
 
         # This is actually dropping out entire tokens to attend to, which might
         # seem a bit unusual, but is taken from the original Transformer paper.
         attention_probs = self.dropout(attention_probs)
-        #run_dict['attention_probs2'] = attention_probs.clone()
+        # run_dict['attention_probs2'] = attention_probs.clone()
 
         # Mask heads if we want to
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
-        remained_idx = adaptive_token_pruning(attention_probs, h = 16, N = 577, ratio = ratio)
+        remained_idx = adaptive_token_pruning(attention_probs, h=16, N=577, ratio=ratio)
 
-        keep_token_mask = create_keep_decision_mask(remained_idx, N = 577, B = 1)
+        keep_token_mask = create_keep_decision_mask(remained_idx, N=577, B=1)
 
         # print('keep token mask', keep_token_mask.size())
         # print(keep_token_mask)
@@ -462,42 +511,41 @@ class ViTSelfAttention(nn.Module):
 
         attention_probs = tensor_float_to_fixed_torch(attention_probs, 16, 8)
         context_layer = torch.matmul(attention_probs, value_layer)
-        #run_dict['context_layer1'] = context_layer.clone()
+        # run_dict['context_layer1'] = context_layer.clone()
 
         context_layer = tensor_fixed_to_float_torch(context_layer, 16)
 
         context_layer = context_layer.permute(0, 2, 1, 3).contiguous()
-        #run_dict['context_layer2'] = context_layer.clone()
+        # run_dict['context_layer2'] = context_layer.clone()
         new_context_layer_shape = context_layer.size()[:-2] + (self.all_head_size,)
 
         context_layer = context_layer.view(new_context_layer_shape)
-        #run_dict['context_layer3'] = context_layer.clone()
+        # run_dict['context_layer3'] = context_layer.clone()
 
         outputs = (context_layer, attention_probs) if output_attentions else (context_layer,)
 
-        #print("cnt =  " + str(len(self.runs_dict)))
-        #run_dict = {}
-        #run_dict['self_query'] = self.query
-        #run_dict['self_key'] = self.key
-        #run_dict['self_value'] = self.value
+        # print("cnt =  " + str(len(self.runs_dict)))
+        # run_dict = {}
+        # run_dict['self_query'] = self.query
+        # run_dict['self_key'] = self.key
+        # run_dict['self_value'] = self.value
 
-        #run_dict['hidden_states'] = hidden_states.clone()
-        #run_dict['mixed_query_layer'] = mixed_query_layer.clone()
+        # run_dict['hidden_states'] = hidden_states.clone()
+        # run_dict['mixed_query_layer'] = mixed_query_layer.clone()
 
-        #run_dict['key_layer'] = key_layer.clone()
-        #run_dict['value_layer'] = value_layer.clone()
-        #run_dict['query_layer'] = query_layer.clone()
+        # run_dict['key_layer'] = key_layer.clone()
+        # run_dict['value_layer'] = value_layer.clone()
+        # run_dict['query_layer'] = query_layer.clone()
 
-        #run_dict['outputs'] = outputs[0].clone()
+        # run_dict['outputs'] = outputs[0].clone()
 
-        #run_key = f"run_{len(self.runs_dict)}"
-        #self.runs_dict[run_key] = run_dict
+        # run_key = f"run_{len(self.runs_dict)}"
+        # self.runs_dict[run_key] = run_dict
 
-        #torch.save(self.runs_dict, r'D:\desktop\598\598_final_project\runs_dict.pt')
+        # torch.save(self.runs_dict, r'D:\desktop\598\598_final_project\runs_dict.pt')
         layer_count = (layer_count + 1) % 24
 
         return outputs
-
 
 
 class ViTSdpaSelfAttention(ViTSelfAttention):
@@ -506,10 +554,10 @@ class ViTSdpaSelfAttention(ViTSelfAttention):
         self.attention_probs_dropout_prob = config.attention_probs_dropout_prob
 
     def forward(
-        self,
-        hidden_states: torch.FloatTensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
+            self,
+            hidden_states: torch.FloatTensor,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: bool = False,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         if output_attentions or head_mask is not None:
             logger.warning_once(
@@ -591,10 +639,10 @@ class ViTAttention(nn.Module):
         self.pruned_heads = self.pruned_heads.union(heads)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
+            self,
+            hidden_states: torch.Tensor,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: bool = False,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         self_outputs = self.attention(hidden_states, head_mask, output_attentions)
 
@@ -661,10 +709,10 @@ class ViTLayer(nn.Module):
         self.layernorm_after = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
+            self,
+            hidden_states: torch.Tensor,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: bool = False,
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         self_attention_outputs = self.attention(
             self.layernorm_before(hidden_states),  # in ViT, layernorm is applied before self-attention
@@ -697,12 +745,12 @@ class ViTEncoder(nn.Module):
         self.gradient_checkpointing = False
 
     def forward(
-        self,
-        hidden_states: torch.Tensor,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: bool = False,
-        output_hidden_states: bool = False,
-        return_dict: bool = True,
+            self,
+            hidden_states: torch.Tensor,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: bool = False,
+            output_hidden_states: bool = False,
+            return_dict: bool = True,
     ) -> Union[tuple, BaseModelOutput]:
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
@@ -854,14 +902,14 @@ class ViTModel(ViTPreTrainedModel):
         expected_output=_EXPECTED_OUTPUT_SHAPE,
     )
     def forward(
-        self,
-        pixel_values: Optional[torch.Tensor] = None,
-        bool_masked_pos: Optional[torch.BoolTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        interpolate_pos_encoding: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            pixel_values: Optional[torch.Tensor] = None,
+            bool_masked_pos: Optional[torch.BoolTensor] = None,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            interpolate_pos_encoding: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[Tuple, BaseModelOutputWithPooling]:
         r"""
         bool_masked_pos (`torch.BoolTensor` of shape `(batch_size, num_patches)`, *optional*):
@@ -951,7 +999,7 @@ class ViTForMaskedImageModeling(ViTPreTrainedModel):
         self.decoder = nn.Sequential(
             nn.Conv2d(
                 in_channels=config.hidden_size,
-                out_channels=config.encoder_stride**2 * config.num_channels,
+                out_channels=config.encoder_stride ** 2 * config.num_channels,
                 kernel_size=1,
             ),
             nn.PixelShuffle(config.encoder_stride),
@@ -963,14 +1011,14 @@ class ViTForMaskedImageModeling(ViTPreTrainedModel):
     @add_start_docstrings_to_model_forward(VIT_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=MaskedImageModelingOutput, config_class=_CONFIG_FOR_DOC)
     def forward(
-        self,
-        pixel_values: Optional[torch.Tensor] = None,
-        bool_masked_pos: Optional[torch.BoolTensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        interpolate_pos_encoding: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            pixel_values: Optional[torch.Tensor] = None,
+            bool_masked_pos: Optional[torch.BoolTensor] = None,
+            head_mask: Optional[torch.Tensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            interpolate_pos_encoding: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[tuple, MaskedImageModelingOutput]:
         r"""
         bool_masked_pos (`torch.BoolTensor` of shape `(batch_size, num_patches)`):
@@ -1025,7 +1073,7 @@ class ViTForMaskedImageModeling(ViTPreTrainedModel):
         # Reshape to (batch_size, num_channels, height, width)
         sequence_output = sequence_output[:, 1:]
         batch_size, sequence_length, num_channels = sequence_output.shape
-        height = width = math.floor(sequence_length**0.5)
+        height = width = math.floor(sequence_length ** 0.5)
         sequence_output = sequence_output.permute(0, 2, 1).reshape(batch_size, num_channels, height, width)
 
         # Reconstruct pixel values
@@ -1092,14 +1140,14 @@ class ViTForImageClassification(ViTPreTrainedModel):
         expected_output=_IMAGE_CLASS_EXPECTED_OUTPUT,
     )
     def forward(
-        self,
-        pixel_values: Optional[torch.Tensor] = None,
-        head_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        output_attentions: Optional[bool] = None,
-        output_hidden_states: Optional[bool] = None,
-        interpolate_pos_encoding: Optional[bool] = None,
-        return_dict: Optional[bool] = None,
+            self,
+            pixel_values: Optional[torch.Tensor] = None,
+            head_mask: Optional[torch.Tensor] = None,
+            labels: Optional[torch.Tensor] = None,
+            output_attentions: Optional[bool] = None,
+            output_hidden_states: Optional[bool] = None,
+            interpolate_pos_encoding: Optional[bool] = None,
+            return_dict: Optional[bool] = None,
     ) -> Union[tuple, ImageClassifierOutput]:
         r"""
         labels (`torch.LongTensor` of shape `(batch_size,)`, *optional*):
