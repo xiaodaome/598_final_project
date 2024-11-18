@@ -44,7 +44,98 @@ from ...utils import (
 from .configuration_vit import ViTConfig
 
 import numpy as np
+import torch.nn.functional as F
+def calculate_percentage_ones(G):
+    """
+    Calculate the percentage of elements in G that are 1 (True).
 
+    Parameters:
+        G (torch.Tensor): A boolean tensor.
+
+    Returns:
+        float: The percentage of elements that are 1 (True).
+    """
+    if not G.dtype == torch.bool:
+        raise ValueError("Input tensor G must be of type torch.bool.")
+
+    # Total number of elements in G
+    total_elements = G.numel()
+
+    # Count the number of 1s (True)
+    count_ones = G.sum().item()  # G.sum() calculates the number of True values
+
+    # Calculate percentage
+    percentage_ones = (count_ones / total_elements) * 100
+
+    # Print the result
+    print(f"Percentage of 1s (True) in G: {percentage_ones:.2f}%")
+
+    return percentage_ones
+
+def masked_softmax(attention_scores, G, dim=-1):
+    """
+    Compute softmax with a mask (G).
+
+    Parameters:
+        attention_scores (torch.Tensor): Raw attention scores (N x N).
+        G (torch.Tensor): Mask matrix (N x N), where G[i, j] = 1 if token j contributes to token i, else 0.
+        dim (int): Dimension to apply softmax on (default: -1).
+
+    Returns:
+        torch.Tensor: Masked attention matrix (N x N).
+    """
+    # Ensure G is converted to bool type
+    # mask = G.bool()  # Convert G to boolean
+
+    # Mask the attention scores: Set masked elements to a very large negative value
+    # print('before mask')
+    masked_scores = attention_scores.masked_fill( ~G, torch.tensor(float('-inf')))
+    # print('after mask')
+
+    # Apply softmax to the masked scores
+    attention_probs = F.softmax(masked_scores, dim=dim)
+
+    return attention_probs
+
+def update_G_matrix(G, keep_token_mask):
+    """
+    Update the G matrix by masking out tokens not in keep_token_mask.
+
+    Parameters:
+        G (torch.Tensor): Current G matrix (N x N).
+        keep_token_mask (torch.Tensor): Binary mask indicating which tokens to keep (B x N).
+
+    Returns:
+        torch.Tensor: Updated G matrix.
+    """
+    # Ensure `keep_token_mask` has the correct dimensions (B x N x N)
+    # keep_token_mask_expanded = keep_token_mask_expanded * keep_token_mask_expanded
+    # keep_token_mask_expanded = keep_token_mask.unsqueeze(1) * keep_token_mask.unsqueeze(-1)
+    # keep_token_mask_expanded = keep_token_mask_expanded.bool()
+    # print('keep_token_mask', keep_token_mask)
+    # 去掉第一个维度（1）以便逻辑或操作
+    mask_row = keep_token_mask.squeeze(0).unsqueeze(1)  # Shape: (N, 1)
+    mask_col = keep_token_mask.squeeze(0).unsqueeze(0)  # Shape: (1, N)
+
+    # print('mask_row', mask_row)
+    # print('mask_col', mask_col)
+
+    # 逻辑或操作生成 NxN 矩阵
+    keep_token_mask_expanded = mask_row | mask_col
+    # print('keep_token_mask_expanded', keep_token_mask_expanded)
+    # 将 NxN 矩阵重复 B 次，得到 BxNxN
+    keep_token_mask_expanded = keep_token_mask_expanded.unsqueeze(0).repeat(16, 1, 1)
+
+    keep_token_mask_expanded = keep_token_mask_expanded.bool()
+
+    # Update G: Set elements to 0 where keep_token_mask is 0
+    # print('before update')
+    # print('Gtype=',G.type())
+    G_updated = G & keep_token_mask_expanded
+    # print('Gupdatetype=', G_updated.type())
+    # print('after update')
+
+    return G_updated
 
 def tensor_float_to_fixed_torch(tensor, N, R):
     """
@@ -127,6 +218,7 @@ def create_keep_decision_mask(remained_idx, N, B):
     return mask
 
 layer_count = 0
+G = 0
 
 logger = logging.get_logger(__name__)
 
@@ -298,11 +390,30 @@ class ViTSelfAttention(nn.Module):
         self, hidden_states, head_mask: Optional[torch.Tensor] = None, output_attentions: bool = False
     ) -> Union[Tuple[torch.Tensor, torch.Tensor], Tuple[torch.Tensor]]:
         # print(hidden_states.size())
+        global layer_count, G
+
+        if (layer_count == 12 or layer_count == 4 or layer_count == 8 or layer_count == 16 or layer_count == 20):
+            ratio = 0.8
+        else:
+            ratio = 1
+
+        # hidden_states = tensor_float_to_fixed_torch(hidden_states, 16, 8)
+        # # self.query.weight = tensor_float_to_fixed_torch(query.weight, 16, 8)
+        # # self.query.bias = tensor_float_to_fixed_torch(query.bias, 16, 16)
+        # self.key.weight = tensor_float_to_fixed_torch(key.weight, 16, 8)
+        # self.key.bias = tensor_float_to_fixed_torch(key.bias, 16, 16)
+        # self.value.weight = tensor_float_to_fixed_torch(value.weight, 16, 8)
+        # self.value.bias = tensor_float_to_fixed_torch(value.bias, 16, 16)
+
         mixed_query_layer = self.query(hidden_states)
 
         key_layer = self.transpose_for_scores(self.key(hidden_states))
         value_layer = self.transpose_for_scores(self.value(hidden_states))
         query_layer = self.transpose_for_scores(mixed_query_layer)
+
+        # key_layer = tensor_fixed_to_float_torch(key_layer, 16)
+        # value_layer = tensor_fixed_to_float_torch(value_layer,  16)
+        # query_layer = tensor_fixed_to_float_torch(query_layer,  16)
 
         key_layer = tensor_float_to_fixed_torch(key_layer, 16, 8)
         value_layer = tensor_float_to_fixed_torch(value_layer, 16, 8)
@@ -312,14 +423,22 @@ class ViTSelfAttention(nn.Module):
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         # print(attention_scores.size())
         #run_dict['attention_scores1'] = attention_scores.clone()
-
+        print('layer_count', layer_count)
+        if (layer_count == 0):
+            G = torch.ones(attention_scores.size(), dtype=torch.bool)
+            # G = torch.tensor(G, dtype=torch.bool) if not isinstance(G, torch.Tensor) else G
+        # print('G',G)
+        calculate_percentage_ones(G)
         attention_scores = tensor_fixed_to_float_torch(attention_scores, 16)
 
         attention_scores = attention_scores / math.sqrt(self.attention_head_size)
         #run_dict['attention_scores2'] = attention_scores.clone()
 
         # Normalize the attention scores to probabilities.
-        attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        # attention_probs = nn.functional.softmax(attention_scores, dim=-1)
+        attention_probs = masked_softmax(attention_scores, G)
+        # print('attention_probs', attention_probs)
+
         #run_dict['attention_probs1'] = attention_probs.clone()
 
         # This is actually dropping out entire tokens to attend to, which might
@@ -331,21 +450,13 @@ class ViTSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
-        global layer_count
-
-        if (layer_count == 12 or layer_count == 16 or layer_count == 20):
-            ratio = 0.9
-        else:
-            ratio = 1
-
-        layer_count = layer_count + 1
-
         remained_idx = adaptive_token_pruning(attention_probs, h = 16, N = 577, ratio = ratio)
 
         keep_token_mask = create_keep_decision_mask(remained_idx, N = 577, B = 1)
 
         # print('keep token mask', keep_token_mask.size())
         # print(keep_token_mask)
+        G = update_G_matrix(G, keep_token_mask)
 
         attention_probs = attention_probs * keep_token_mask.unsqueeze(1).unsqueeze(-1)
 
@@ -383,6 +494,7 @@ class ViTSelfAttention(nn.Module):
         #self.runs_dict[run_key] = run_dict
 
         #torch.save(self.runs_dict, r'D:\desktop\598\598_final_project\runs_dict.pt')
+        layer_count = (layer_count + 1) % 24
 
         return outputs
 
