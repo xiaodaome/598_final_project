@@ -70,7 +70,7 @@ def calculate_percentage_ones(G):
     percentage_ones = (count_ones / total_elements) * 100
 
     # Print the result
-    print(f"Percentage of 1s (True) in G: {percentage_ones:.2f}%")
+    # print(f"Percentage of 1s (True) in G: {percentage_ones:.2f}%")
 
     return percentage_ones
 
@@ -472,7 +472,7 @@ class ViTSelfAttention(nn.Module):
         attention_scores = torch.matmul(query_layer, key_layer.transpose(-1, -2))
         # print(attention_scores.size())
         # run_dict['attention_scores1'] = attention_scores.clone()
-        print('layer_count', layer_count)
+        # print('layer_count', layer_count)
         if (layer_count == 0):
             G = torch.ones(attention_scores.size(), dtype=torch.bool)
             # G = torch.tensor(G, dtype=torch.bool) if not isinstance(G, torch.Tensor) else G
@@ -499,7 +499,7 @@ class ViTSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
-        remained_idx = adaptive_token_pruning(attention_probs, h=16, N=577, ratio=ratio)
+        remained_idx = adaptive_token_pruning(attention_probs, h=16, N=577, ratio=1)
 
         keep_token_mask = create_keep_decision_mask(remained_idx, N=577, B=1)
 
@@ -543,6 +543,8 @@ class ViTSelfAttention(nn.Module):
         # self.runs_dict[run_key] = run_dict
 
         # torch.save(self.runs_dict, r'D:\desktop\598\598_final_project\runs_dict.pt')
+        if (layer_count == 23):
+            print('last layer G percentage = ',calculate_percentage_ones(G))
         layer_count = (layer_count + 1) % 24
 
         return outputs
