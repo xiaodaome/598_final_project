@@ -5,15 +5,16 @@ import requests
 import os
 import scipy.io
 import csv
+import pandas as pd
 import numpy as np
 
-IMAG_NUM = 5  # 设置验证图片数量
+IMAG_NUM = 200  # 设置验证图片数量
 correct_num = 0
 error_records = []  # 用于记录错误信息
 correct = []
 
-# 定义CSV文件名
-csv_filename = "test_results.csv"
+# 定义CSV文件名 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+csv_filename = "16_0.8_test.csv"
 
 # 打开CSV文件
 csvfile = open(csv_filename, 'w', newline='', encoding='utf-8')
@@ -122,9 +123,50 @@ with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
     writer = csv.writer(csvfile)
     writer.writerows(updated_rows)
 
+
 # 计算准确率
 accuracy = correct_num / IMAG_NUM
 print('accuracy = ', accuracy)
+
+column_name = 'calculation_amount'  # 要计算平均值的列名
+values = []
+with open(csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
+    reader = csv.DictReader(csvfile)
+    for row in reader:
+        # 获取指定列的值，并转换为浮点数
+        value = row[column_name]
+        # 移除百分号
+        value = value.replace('%', '')
+        if value != '':
+            values.append(float(value))
+
+# 计算平均值，转化为百分号
+if values:
+    average_calculation_amount = 0.01 * sum(values) / len(values)
+
+
+# 读取现有的 CSV 文件
+with open(csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
+    reader = csv.reader(csvfile)
+    rows = list(reader)
+
+# 在表头中添加 'correct_num' 和 'accuracy' 列
+header = rows[0] + ['correct_num', 'IMAG_NUM', 'accuracy', 'Average_calculation_amount']
+updated_rows = [header]
+
+# 在表头下面添加一行，写入 correct_num 和 accuracy
+# 其他列可以填充空字符串 ''
+first_data_row = ['Summary:'] + [correct_num, IMAG_NUM, f'{accuracy:.2%}', f'{average_calculation_amount:.3%}']
+updated_rows.append(first_data_row)
+
+# 将原来的数据行添加回去
+updated_rows.extend(rows[1:])
+
+# 将更新后的内容写回 CSV 文件
+with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerows(updated_rows)
+
 
 # 打印错误记录
 print("\nErrors and mismatches:")
