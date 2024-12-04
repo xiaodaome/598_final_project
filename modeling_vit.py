@@ -228,6 +228,9 @@ def create_keep_decision_mask(remained_idx, N, B):
 
 layer_count = 0
 G = 0
+calculation_amount = 0
+N = 577
+D = 64
 
 logger = logging.get_logger(__name__)
 
@@ -427,10 +430,10 @@ class ViTSelfAttention(nn.Module):
                 value_quantized.bias.copy_(quantized_bias)
         # print(hidden_states.size())
 
-        global layer_count, G
+        global layer_count, G, calculation_amount, N, D
 
-        if (layer_count == 12 or layer_count == 4 or layer_count == 8 or layer_count == 16 or layer_count == 20):
-            ratio = 0.8
+        if (layer_count == 4 or layer_count == 8 or layer_count == 12 or layer_count == 16 or layer_count == 20):
+            ratio = 0.7
         else:
             ratio = 1
 
@@ -456,6 +459,8 @@ class ViTSelfAttention(nn.Module):
         key_layer = tensor_fixed_to_float_torch(key_layer, 16)
         value_layer = tensor_fixed_to_float_torch(value_layer, 16)
         query_layer = tensor_fixed_to_float_torch(query_layer, 16)
+
+        # print('In Layer: ',layer_count,', N and D are: ',key_layer.size())
 
         # key_layer = tensor_fixed_to_float_torch(key_layer, 16)
         # value_layer = tensor_fixed_to_float_torch(value_layer,  16)
@@ -499,12 +504,17 @@ class ViTSelfAttention(nn.Module):
         if head_mask is not None:
             attention_probs = attention_probs * head_mask
 
-        remained_idx = adaptive_token_pruning(attention_probs, h=16, N=577, ratio=1)
+        remained_idx = adaptive_token_pruning(attention_probs, h=16, N=577, ratio=ratio)
 
         keep_token_mask = create_keep_decision_mask(remained_idx, N=577, B=1)
 
         # print('keep token mask', keep_token_mask.size())
         # print(keep_token_mask)
+
+        if (ratio != 1):
+            print(f'In Layer: {layer_count}, alpha^2 = {calculate_percentage_ones(G):.3f}%')
+        calculation_amount = calculation_amount + (2 * ((calculate_percentage_ones(G))**0.5) * D + calculate_percentage_ones(G) * N)/ ((2 * D + N) * 24)
+
         G = update_G_matrix(G, keep_token_mask)
 
         attention_probs = attention_probs * keep_token_mask.unsqueeze(1).unsqueeze(-1)
@@ -544,7 +554,10 @@ class ViTSelfAttention(nn.Module):
 
         # torch.save(self.runs_dict, r'D:\desktop\598\598_final_project\runs_dict.pt')
         if (layer_count == 23):
-            print('last layer G percentage = ',calculate_percentage_ones(G))
+            # print('last layer G percentage = ',calculate_percentage_ones(G))
+            print(f'Last layer G percentage = {calculate_percentage_ones(G):.3f}%')
+            print(f'calculation_amount = {calculation_amount:.3f}%')
+            calculation_amount = 0
         layer_count = (layer_count + 1) % 24
 
         return outputs

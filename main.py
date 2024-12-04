@@ -3,6 +3,7 @@ from PIL import Image
 import requests
 import os
 import scipy.io
+import csv
 import numpy as np
 
 IMAG_NUM = 10  # 设置验证图片数量
@@ -65,6 +66,7 @@ for i, image_file in enumerate(image_files, 1):
             })
 
         print('accuracy rate = ', correct_num, ' / ', i )
+        print()
 
     except Exception as e:
         error_records.append({
