@@ -14,7 +14,7 @@ error_records = []  # 用于记录错误信息
 correct = []
 
 # 定义CSV文件名 !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-csv_filename = "16_0.8_test.csv"
+csv_filename = "20_0.8_test.csv"
 
 # 打开CSV文件
 csvfile = open(csv_filename, 'w', newline='', encoding='utf-8')
