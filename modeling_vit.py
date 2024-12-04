@@ -45,6 +45,7 @@ from .configuration_vit import ViTConfig
 
 import numpy as np
 import torch.nn.functional as F
+import csv
 
 
 def calculate_percentage_ones(G):
@@ -231,6 +232,8 @@ G = 0
 calculation_amount = 0
 N = 577
 D = 64
+imag_idx = 1
+alpha_values = []
 
 logger = logging.get_logger(__name__)
 
@@ -394,6 +397,8 @@ class ViTSelfAttention(nn.Module):
 
         self.dropout = nn.Dropout(config.attention_probs_dropout_prob)
 
+        # self.alpha_values = [] # 用于存储每一层的alpha值
+
     def transpose_for_scores(self, x: torch.Tensor) -> torch.Tensor:
         new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = x.view(new_x_shape)
@@ -430,7 +435,7 @@ class ViTSelfAttention(nn.Module):
                 value_quantized.bias.copy_(quantized_bias)
         # print(hidden_states.size())
 
-        global layer_count, G, calculation_amount, N, D
+        global layer_count, G, calculation_amount, N, D, imag_idx, alpha_values
 
         if (layer_count == 4 or layer_count == 8 or layer_count == 12 or layer_count == 16 or layer_count == 20):
             ratio = 0.7
@@ -513,7 +518,21 @@ class ViTSelfAttention(nn.Module):
 
         if (ratio != 1):
             print(f'In Layer: {layer_count}, alpha^2 = {calculate_percentage_ones(G):.3f}%')
-        calculation_amount = calculation_amount + (2 * ((calculate_percentage_ones(G))**0.5) * D + calculate_percentage_ones(G) * N)/ ((2 * D + N) * 24)
+
+        alpha = (calculate_percentage_ones(G))**0.5
+        alpha_values.append(alpha * 10)
+        calculation_amount = calculation_amount + (2 * alpha * D + calculate_percentage_ones(G) * N)/ ((2 * D + N) * 24)
+        # # 收集alpha值
+        # alphas = []
+        # calculation_amount = 0
+        # for attention_module in attention_modules:
+        #     alphas.extend(attention_module.alpha_values)
+        #     # 如果calculation_amount是每层的，需要累加
+        #     calculation_amount += attention_module.calculation_amount  # 如果适用
+        #
+        # # 准备要写入CSV的数据
+        # row = [image_file] + alphas + [calculation_amount, correct]
+        # writer.writerow(row)
 
         G = update_G_matrix(G, keep_token_mask)
 
@@ -553,12 +572,23 @@ class ViTSelfAttention(nn.Module):
         # self.runs_dict[run_key] = run_dict
 
         # torch.save(self.runs_dict, r'D:\desktop\598\598_final_project\runs_dict.pt')
+        csv_filename = "test_results.csv"
+        csvfile = open(csv_filename, 'a', newline='', encoding='utf-8')
+        writer = csv.writer(csvfile)
+
         if (layer_count == 23):
             # print('last layer G percentage = ',calculate_percentage_ones(G))
             print(f'Last layer G percentage = {calculate_percentage_ones(G):.3f}%')
             print(f'calculation_amount = {calculation_amount:.3f}%')
+
+            row = [imag_idx] + [f"{value:.3f}%" for value in alpha_values] + [f"{calculation_amount:.3f}%"]
+            writer.writerow(row)
+            imag_idx = imag_idx + 1
+            alpha_values = []
             calculation_amount = 0
+
         layer_count = (layer_count + 1) % 24
+        csvfile.close()
 
         return outputs
 

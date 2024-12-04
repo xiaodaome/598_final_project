@@ -1,4 +1,5 @@
 from transformers import ViTImageProcessor, ViTForImageClassification
+from transformers.models.vit.modeling_vit import ViTSelfAttention
 from PIL import Image
 import requests
 import os
@@ -6,9 +7,23 @@ import scipy.io
 import csv
 import numpy as np
 
-IMAG_NUM = 10  # 设置验证图片数量
+IMAG_NUM = 5  # 设置验证图片数量
 correct_num = 0
 error_records = []  # 用于记录错误信息
+correct = []
+
+# 定义CSV文件名
+csv_filename = "test_results.csv"
+
+# 打开CSV文件
+csvfile = open(csv_filename, 'w', newline='', encoding='utf-8')
+writer = csv.writer(csvfile)
+
+# 写入表头
+header = ['image_file'] + [f'alpha_{i}' for i in range(24)] + ['calculation_amount']
+writer.writerow(header)
+# 关闭CSV文件
+csvfile.close()
 
 # 设置验证集文件夹路径
 VALIDATE_FOLDER     = "../ILSVRC2012_img_val"
@@ -21,6 +36,16 @@ image_files = sorted(image_files)[0:IMAG_NUM]  # 根据参数选择指定数量�
 
 feature_extractor = ViTImageProcessor.from_pretrained('google/vit-large-patch16-384')
 model = ViTForImageClassification.from_pretrained('google/vit-large-patch16-384')
+
+# 获取模型中所有的ViTSelfAttention实例
+def get_attention_modules(model):
+    attention_modules = []
+    for module in model.modules():
+        if isinstance(module, ViTSelfAttention):
+            attention_modules.append(module)
+    return attention_modules
+
+attention_modules = get_attention_modules(model)
 
 meta_data = scipy.io.loadmat(meta_file)
 # 假设 synsets 是 numpy 数组，且每个元素包含 ['ILSVRC2012_ID', 'WNID', 'words']
@@ -57,8 +82,10 @@ for i, image_file in enumerate(image_files, 1):
 
         # 比较预测结果与真实标签
         if model.config.id2label[predicted_class_idx] == description[0]:
+            correct.append(1)
             correct_num += 1
         else:
+            correct.append(0)
             error_records.append({
                 "image_file": image_file,
                 "predicted": model.config.id2label[predicted_class_idx],
@@ -68,11 +95,32 @@ for i, image_file in enumerate(image_files, 1):
         print('accuracy rate = ', correct_num, ' / ', i )
         print()
 
+
     except Exception as e:
         error_records.append({
             "image_file": image_file,
             "error": str(e)
         })
+
+# 写入正确与否
+# 读取现有的 CSV 文件
+with open(csv_filename, 'r', newline='', encoding='utf-8') as csvfile:
+    reader = csv.reader(csvfile)
+    rows = list(reader)
+
+# 在表头中添加 'correct' 列
+header = rows[0] + ['correct']
+updated_rows = [header]
+
+# 对于每一行，添加对应的 `correct` 值
+for i, row in enumerate(rows[1:]):  # 跳过表头
+    row_with_correct = row + [correct[i]]
+    updated_rows.append(row_with_correct)
+
+# 将更新后的内容写回 CSV 文件
+with open(csv_filename, 'w', newline='', encoding='utf-8') as csvfile:
+    writer = csv.writer(csvfile)
+    writer.writerows(updated_rows)
 
 # 计算准确率
 accuracy = correct_num / IMAG_NUM
